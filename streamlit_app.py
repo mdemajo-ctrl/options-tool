@@ -524,15 +524,22 @@ if 'expirations' in st.session_state and st.session_state['expirations']:
                 key="calls_editor"
             )
 
-            # Save positions
+            # Save positions and detect changes
+            calls_changed = False
             for idx, row in edited_calls.iterrows():
+                strike = row['Strike']
+                old_pos = st.session_state['calls_positions'].get(strike, {})
                 if row['Position'] != 0:
-                    st.session_state['calls_positions'][row['Strike']] = {
-                        'position': row['Position'],
-                        'entry': row['Entry']
-                    }
-                elif row['Strike'] in st.session_state['calls_positions']:
-                    del st.session_state['calls_positions'][row['Strike']]
+                    new_pos = {'position': row['Position'], 'entry': row['Entry']}
+                    if old_pos != new_pos:
+                        calls_changed = True
+                    st.session_state['calls_positions'][strike] = new_pos
+                elif strike in st.session_state['calls_positions']:
+                    calls_changed = True
+                    del st.session_state['calls_positions'][strike]
+
+            if calls_changed:
+                st.rerun()
 
         with tab2:
             st.markdown("**Enter positions below** (+ = long, - = short)")
@@ -564,15 +571,22 @@ if 'expirations' in st.session_state and st.session_state['expirations']:
                 key="puts_editor"
             )
 
-            # Save positions
+            # Save positions and detect changes
+            puts_changed = False
             for idx, row in edited_puts.iterrows():
+                strike = row['Strike']
+                old_pos = st.session_state['puts_positions'].get(strike, {})
                 if row['Position'] != 0:
-                    st.session_state['puts_positions'][row['Strike']] = {
-                        'position': row['Position'],
-                        'entry': row['Entry']
-                    }
-                elif row['Strike'] in st.session_state['puts_positions']:
-                    del st.session_state['puts_positions'][row['Strike']]
+                    new_pos = {'position': row['Position'], 'entry': row['Entry']}
+                    if old_pos != new_pos:
+                        puts_changed = True
+                    st.session_state['puts_positions'][strike] = new_pos
+                elif strike in st.session_state['puts_positions']:
+                    puts_changed = True
+                    del st.session_state['puts_positions'][strike]
+
+            if puts_changed:
+                st.rerun()
 
         # Download button
         st.divider()
