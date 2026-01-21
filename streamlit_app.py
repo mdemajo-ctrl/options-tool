@@ -42,6 +42,32 @@ def calculate_delta(spot, strike, time_to_expiry, volatility, option_type="CALL"
         return 0.5 if option_type == "CALL" else -0.5
 
 
+def black_scholes_price(spot, strike, time_to_expiry, volatility, option_type="CALL"):
+    """Calculate Black-Scholes option price."""
+    if time_to_expiry <= 0:
+        # At expiry, return intrinsic value
+        if option_type == "CALL":
+            return max(spot - strike, 0)
+        else:
+            return max(strike - spot, 0)
+
+    if volatility <= 0 or spot <= 0 or strike <= 0:
+        return 0
+
+    try:
+        d1 = (math.log(spot / strike) + (RISK_FREE_RATE + 0.5 * volatility ** 2) * time_to_expiry) / (volatility * math.sqrt(time_to_expiry))
+        d2 = d1 - volatility * math.sqrt(time_to_expiry)
+
+        if option_type == "CALL":
+            price = spot * normal_cdf(d1) - strike * math.exp(-RISK_FREE_RATE * time_to_expiry) * normal_cdf(d2)
+        else:
+            price = strike * math.exp(-RISK_FREE_RATE * time_to_expiry) * normal_cdf(-d2) - spot * normal_cdf(-d1)
+
+        return max(price, 0)
+    except:
+        return 0
+
+
 @st.cache_data(ttl=300)
 def get_expirations_and_price(ticker):
     """Fetch stock price and available expirations."""
@@ -105,18 +131,41 @@ def process_options_df(records, current_price, time_to_expiry, option_type):
     return pd.DataFrame(result)
 
 
-def calculate_pnl(df, stock_at_expiry, option_type):
-    """Calculate P&L for each position."""
+def calculate_pnl(df, stock_scenario, option_type, days_to_scenario=0, iv_adjustment=0.0):
+    """Calculate P&L for each position.
+
+    Args:
+        df: DataFrame with options data
+        stock_scenario: Stock price at scenario date
+        option_type: "CALL" or "PUT"
+        days_to_scenario: Days until scenario (0 = at expiry, >0 = before expiry)
+        iv_adjustment: Percentage adjustment to IV (e.g., 0.1 = +10% IV)
+    """
     df = df.copy()
 
-    if option_type == "CALL":
-        df['Val@Exp'] = (stock_at_expiry - df['Strike']).clip(lower=0)
+    if days_to_scenario <= 0:
+        # At expiry - use intrinsic value
+        if option_type == "CALL":
+            df['ScenValue'] = (stock_scenario - df['Strike']).clip(lower=0)
+        else:
+            df['ScenValue'] = (df['Strike'] - stock_scenario).clip(lower=0)
     else:
-        df['Val@Exp'] = (df['Strike'] - stock_at_expiry).clip(lower=0)
+        # Before expiry - use Black-Scholes
+        time_to_expiry = days_to_scenario / 365.0
+        df['ScenValue'] = df.apply(
+            lambda r: black_scholes_price(
+                stock_scenario,
+                r['Strike'],
+                time_to_expiry,
+                r['IV'] * (1 + iv_adjustment) if r['IV'] > 0 else 0.3,  # Default 30% IV if missing
+                option_type
+            ),
+            axis=1
+        )
 
     df['PremPaid'] = df.apply(lambda r: r['Entry'] * r['Position'] * 100 if r['Position'] > 0 else 0, axis=1)
     df['PremRcvd'] = df.apply(lambda r: r['Entry'] * -r['Position'] * 100 if r['Position'] < 0 else 0, axis=1)
-    df['Payout'] = df['Val@Exp'] * df['Position'] * 100
+    df['Payout'] = df['ScenValue'] * df['Position'] * 100
     df['P&L'] = df['Payout'] - df['PremPaid'] + df['PremRcvd']
 
     return df
@@ -303,15 +352,46 @@ with st.sidebar:
         st.metric("Current Price", f"${st.session_state.get('current_price', 0):.2f}")
 
         st.divider()
-        st.subheader("📊 Scenario")
+        st.subheader("📊 Scenario Analysis")
 
-        stock_at_expiry = st.number_input(
-            "Stock @ Expiry",
+        # Calculate days to expiry for this option
+        expiry_date = datetime.strptime(expiry, "%Y-%m-%d")
+        actual_days_to_expiry = max((expiry_date - datetime.now()).days, 0)
+
+        days_to_scenario = st.slider(
+            "Days to Scenario",
+            min_value=0,
+            max_value=max(actual_days_to_expiry, 1),
+            value=0,
+            help="0 = At expiry (intrinsic value), >0 = Before expiry (Black-Scholes theoretical value)"
+        )
+        st.session_state['days_to_scenario'] = days_to_scenario
+
+        if days_to_scenario > 0:
+            st.caption(f"📅 Modeling {days_to_scenario} days before expiry")
+        else:
+            st.caption("📅 At expiration (intrinsic value)")
+
+        stock_scenario = st.number_input(
+            "Stock Price @ Scenario",
             value=st.session_state.get('current_price', 100.0),
             step=1.0,
             format="%.2f"
         )
-        st.session_state['stock_at_expiry'] = stock_at_expiry
+        st.session_state['stock_scenario'] = stock_scenario
+
+        iv_adjustment = st.slider(
+            "IV Adjustment",
+            min_value=-0.5,
+            max_value=1.0,
+            value=0.0,
+            step=0.05,
+            format="%.0f%%",
+            help="Adjust implied volatility for scenario (+10% = IV increases by 10%)"
+        )
+        st.session_state['iv_adjustment'] = iv_adjustment
+        if iv_adjustment != 0:
+            st.caption(f"📈 IV {'increased' if iv_adjustment > 0 else 'decreased'} by {abs(iv_adjustment)*100:.0f}%")
 
         st.divider()
         st.subheader("📈 Stock Position")
@@ -338,13 +418,20 @@ if 'expirations' in st.session_state and st.session_state['expirations']:
     ticker = st.session_state.get('ticker', '')
     expiry = st.session_state.get('selected_expiry', '')
     current_price = st.session_state.get('current_price', 0)
-    stock_at_expiry = st.session_state.get('stock_at_expiry', current_price)
+    stock_scenario = st.session_state.get('stock_scenario', current_price)
+    days_to_scenario = st.session_state.get('days_to_scenario', 0)
+    iv_adjustment = st.session_state.get('iv_adjustment', 0.0)
 
     expiry_date = datetime.strptime(expiry, "%Y-%m-%d")
     days_to_expiry = (expiry_date - datetime.now()).days
     time_to_expiry = max(days_to_expiry / 365.0, 0.001)
 
-    st.subheader(f"{ticker} Options - Expires {expiry} ({days_to_expiry} days)")
+    # Display header with scenario info
+    if days_to_scenario > 0:
+        st.subheader(f"{ticker} Options - Expires {expiry} ({days_to_expiry} days)")
+        st.info(f"🔮 **Scenario Analysis**: {days_to_scenario} days before expiry | Stock @ ${stock_scenario:.2f} | IV adjustment: {iv_adjustment*100:+.0f}%")
+    else:
+        st.subheader(f"{ticker} Options - Expires {expiry} ({days_to_expiry} days)")
 
     # Fetch options chain
     with st.spinner("Loading options chain..."):
@@ -368,13 +455,13 @@ if 'expirations' in st.session_state and st.session_state['expirations']:
                 puts_df.loc[mask, 'Entry'] = pos['entry']
 
         # Calculate P&L
-        calls_pnl = calculate_pnl(calls_df, stock_at_expiry, "CALL")
-        puts_pnl = calculate_pnl(puts_df, stock_at_expiry, "PUT")
+        calls_pnl = calculate_pnl(calls_df, stock_scenario, "CALL", days_to_scenario, iv_adjustment)
+        puts_pnl = calculate_pnl(puts_df, stock_scenario, "PUT", days_to_scenario, iv_adjustment)
 
         # Stock P&L
         stock_shares = st.session_state.get('stock_shares', 0)
         stock_entry = st.session_state.get('stock_entry', current_price)
-        stock_pnl = (stock_at_expiry - stock_entry) * stock_shares
+        stock_pnl = (stock_scenario - stock_entry) * stock_shares
 
         # Summary metrics
         calls_with_pos = calls_pnl[calls_pnl['Position'] != 0]
@@ -387,7 +474,10 @@ if 'expirations' in st.session_state and st.session_state['expirations']:
         total_pnl = options_pnl + stock_pnl
 
         # Display summary
-        st.markdown("### 💰 P&L Summary")
+        if days_to_scenario > 0:
+            st.markdown(f"### 💰 P&L Summary (Scenario: {days_to_scenario} days to expiry)")
+        else:
+            st.markdown("### 💰 P&L Summary (At Expiration)")
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Premiums Paid", f"${total_prem_paid:,.0f}")
         col2.metric("Premiums Rcvd", f"${total_prem_rcvd:,.0f}")
@@ -409,8 +499,11 @@ if 'expirations' in st.session_state and st.session_state['expirations']:
             end_idx = min(len(calls_df), atm_idx + 16)
             display_calls = calls_pnl.iloc[start_idx:end_idx].copy()
 
+            # Dynamic column label based on scenario type
+            value_label = "BS Value" if days_to_scenario > 0 else "Val@Exp"
+
             edited_calls = st.data_editor(
-                display_calls[['Strike', 'Bid', 'Ask', 'Mid', 'Delta', 'IV', 'Position', 'Entry', 'PremPaid', 'PremRcvd', 'Val@Exp', 'Payout', 'P&L']],
+                display_calls[['Strike', 'Bid', 'Ask', 'Mid', 'Delta', 'IV', 'Position', 'Entry', 'PremPaid', 'PremRcvd', 'ScenValue', 'Payout', 'P&L']],
                 column_config={
                     "Strike": st.column_config.NumberColumn("Strike", format="$%.2f"),
                     "Bid": st.column_config.NumberColumn("Bid", format="$%.2f"),
@@ -422,7 +515,7 @@ if 'expirations' in st.session_state and st.session_state['expirations']:
                     "Entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
                     "PremPaid": st.column_config.NumberColumn("Prem Paid", format="$%.0f", disabled=True),
                     "PremRcvd": st.column_config.NumberColumn("Prem Rcvd", format="$%.0f", disabled=True),
-                    "Val@Exp": st.column_config.NumberColumn("Val@Exp", format="$%.2f", disabled=True),
+                    "ScenValue": st.column_config.NumberColumn(value_label, format="$%.2f", disabled=True),
                     "Payout": st.column_config.NumberColumn("Payout", format="$%.0f", disabled=True),
                     "P&L": st.column_config.NumberColumn("P&L", format="$%.0f", disabled=True),
                 },
@@ -450,7 +543,7 @@ if 'expirations' in st.session_state and st.session_state['expirations']:
             display_puts = puts_pnl.iloc[start_idx:end_idx].copy()
 
             edited_puts = st.data_editor(
-                display_puts[['Strike', 'Bid', 'Ask', 'Mid', 'Delta', 'IV', 'Position', 'Entry', 'PremPaid', 'PremRcvd', 'Val@Exp', 'Payout', 'P&L']],
+                display_puts[['Strike', 'Bid', 'Ask', 'Mid', 'Delta', 'IV', 'Position', 'Entry', 'PremPaid', 'PremRcvd', 'ScenValue', 'Payout', 'P&L']],
                 column_config={
                     "Strike": st.column_config.NumberColumn("Strike", format="$%.2f"),
                     "Bid": st.column_config.NumberColumn("Bid", format="$%.2f"),
@@ -462,7 +555,7 @@ if 'expirations' in st.session_state and st.session_state['expirations']:
                     "Entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
                     "PremPaid": st.column_config.NumberColumn("Prem Paid", format="$%.0f", disabled=True),
                     "PremRcvd": st.column_config.NumberColumn("Prem Rcvd", format="$%.0f", disabled=True),
-                    "Val@Exp": st.column_config.NumberColumn("Val@Exp", format="$%.2f", disabled=True),
+                    "ScenValue": st.column_config.NumberColumn(value_label, format="$%.2f", disabled=True),
                     "Payout": st.column_config.NumberColumn("Payout", format="$%.0f", disabled=True),
                     "P&L": st.column_config.NumberColumn("P&L", format="$%.0f", disabled=True),
                 },
@@ -509,14 +602,22 @@ else:
     2. Click **Load Expirations** to see available option dates
     3. Select an expiration from the dropdown
     4. **Enter positions** directly in the table (+ for long, - for short)
-    5. Set **Stock @ Expiry** in sidebar for scenario analysis
+    5. Use **Scenario Analysis** in sidebar:
+       - **Days to Scenario**: Set to 0 for expiration P&L, or >0 for pre-expiry modeling
+       - **Stock Price @ Scenario**: Expected stock price at scenario date
+       - **IV Adjustment**: Model changes in implied volatility
     6. Optionally add a **Stock Position** (shares)
     7. View real-time **P&L Summary** at the top
+
+    ### Scenario Analysis:
+    - **At Expiry (Days=0)**: Shows intrinsic value (actual payoff at expiration)
+    - **Before Expiry (Days>0)**: Uses Black-Scholes to model theoretical option values
+    - **IV Adjustment**: Increase/decrease IV to see impact on option prices
 
     ### P&L Breakdown:
     - **Premiums Paid**: Cost of long positions
     - **Premiums Received**: Income from short positions
-    - **Options Payout**: Value received at expiration
+    - **Options Payout**: Value (intrinsic or theoretical) × position
     - **Stock P&L**: Profit/loss on stock position
     - **Total P&L**: Combined result
     """)
