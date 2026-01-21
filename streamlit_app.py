@@ -43,13 +43,13 @@ def calculate_delta(spot, strike, time_to_expiry, volatility, option_type="CALL"
 
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_stock_data(ticker):
+def get_expirations_and_price(ticker):
     """Fetch stock price and available expirations."""
     stock = yf.Ticker(ticker)
     try:
         expirations = list(stock.options)
     except:
-        return None, [], 0
+        return [], 0
 
     try:
         price = stock.info.get('regularMarketPrice') or stock.info.get('currentPrice') or 0
@@ -59,7 +59,7 @@ def get_stock_data(ticker):
     except:
         price = 0
 
-    return stock, expirations, price
+    return expirations, price
 
 
 @st.cache_data(ttl=300)
@@ -271,7 +271,7 @@ with st.sidebar:
 
     if st.button("Load Expirations", type="primary"):
         with st.spinner(f"Loading {ticker}..."):
-            stock, expirations, price = get_stock_data(ticker)
+            expirations, price = get_expirations_and_price(ticker)
             if expirations:
                 st.session_state['expirations'] = expirations
                 st.session_state['current_price'] = price
