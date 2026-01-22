@@ -29,6 +29,41 @@ RISK_FREE_RATE = 0.045
 
 st.set_page_config(page_title="Options Pricing Tool", page_icon="📈", layout="wide")
 
+
+# --- Authentication ---
+def check_password():
+    """Simple password protection."""
+
+    # Check if already authenticated
+    if st.session_state.get("authenticated", False):
+        return True
+
+    # Get password from secrets or use default for local dev
+    try:
+        correct_password = st.secrets["password"]
+    except (KeyError, FileNotFoundError):
+        # No password set - allow access (for local development)
+        return True
+
+    st.title("📈 Options Pricing Tool")
+    st.markdown("### Login Required")
+
+    password = st.text_input("Password", type="password", key="password_input")
+
+    if st.button("Login", type="primary"):
+        if password == correct_password:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password")
+
+    return False
+
+
+# Check authentication before showing app
+if not check_password():
+    st.stop()
+
 st.title("📈 Options Pricing & P&L Tool")
 
 

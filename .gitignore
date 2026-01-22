@@ -1,0 +1,10 @@
+# Secrets (passwords)
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.env
+
+# Excel temp files
+~$*.xlsx
